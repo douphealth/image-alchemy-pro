@@ -14,9 +14,16 @@ export interface ImageFile {
   compressedBlob: Blob | null;
   compressedSize: number | null;
   compressedUrl: string | null;
-  status: 'pending' | 'processing' | 'done' | 'error';
+  status: 'pending' | 'processing' | 'done' | 'error' | 'cancelled';
   error?: string;
   outputFilename: string;
+  /** Per-image override of global compression settings */
+  override?: Partial<CompressionOptions> & { auto?: boolean };
+  /** Format actually used (set after compress, useful when auto-pick) */
+  chosenFormat?: OutputFormat;
+  encodingKey?: string;
+  outputQuality?: number;
+  targetBytes?: number;
 }
 
 const MIME_MAP: Record<OutputFormat, string> = {
@@ -102,6 +109,52 @@ export async function compressImage(file: File, options: CompressionOptions): Pr
   return compressImageCanvas(file, options);
 }
 
+/**
+ * Auto-pick: encode WebP, AVIF, JPEG in parallel and return the smallest.
+ * Decodes the image once, resizes once, then encodes in parallel for speed.
+ */
+export async function compressImageAuto(
+  file: File,
+  options: Omit<CompressionOptions, 'format'>,
+): Promise<{ blob: Blob; format: OutputFormat }> {
+  try {
+    const { decodeImage, resizeImageData, encodeImage, isWasmSupported } = await import('./codecs');
+    if (await isWasmSupported()) {
+      let imageData = await decodeImage(file);
+      const maxDim = options.maxDimension || MAX_DIMENSION;
+      if (imageData.width > maxDim || imageData.height > maxDim) {
+        imageData = resizeImageData(imageData, maxDim);
+      }
+      // JPEG cannot preserve transparent pixels in the export.
+      const formats: OutputFormat[] = ['webp', 'avif'];
+      let opaque = true;
+      for (let i = 3; i < imageData.data.length; i += 4) {
+        if (imageData.data[i] < 255) { opaque = false; break; }
+      }
+      if (opaque) formats.push('jpeg');
+      const results = await Promise.all(
+        formats.map(async (f) => {
+          try {
+            const blob = await encodeImage(imageData, f, options.quality * 100);
+            return { blob, format: f };
+          } catch {
+            return null;
+          }
+        }),
+      );
+      const valid = results.filter((r): r is { blob: Blob; format: OutputFormat } => r !== null);
+      if (valid.length === 0) throw new Error('All encoders failed');
+      valid.sort((a, b) => a.blob.size - b.blob.size);
+      return valid[0];
+    }
+  } catch (err) {
+    console.warn('Auto-pick WASM path failed, falling back to single WebP:', err);
+  }
+  // Fallback: single webp via canvas
+  const blob = await compressImageCanvas(file, { ...options, format: 'webp' });
+  return { blob, format: 'webp' };
+}
+
 function compressImageCanvas(file: File, options: CompressionOptions): Promise<Blob> {
   return new Promise((resolve, reject) => {
     const objectUrl = URL.createObjectURL(file);
@@ -145,10 +198,10 @@ function compressImageCanvas(file: File, options: CompressionOptions): Promise<B
         canvas.toBlob(
           (blob) => {
             URL.revokeObjectURL(objectUrl);
-            if (blob) {
+            if (blob?.type === mime) {
               resolve(blob);
             } else {
-              reject(new Error('Failed to compress image'));
+              reject(new Error('This browser could not export '+options.format.toUpperCase()+'. Try another format.'));
             }
           },
           mime,
