@@ -1,50 +1,247 @@
-import { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import { lazy, Suspense, useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Sparkles, Lock, Globe, Keyboard, CheckCircle2 } from "lucide-react";
-import JSZip from "jszip";
+import Seo from "@/components/seo/Seo";
+import { HOME_FAQS } from "@/content/studio-faq";
+import { Sparkles, Lock, Globe, Keyboard, CheckCircle2, Wand2 } from "lucide-react";
+import { useLocation } from "react-router-dom";
 import { toast } from "sonner";
-import DropZone from "@/components/DropZone";
+import StudioIntro from "@/components/StudioIntro";
 import ImageCard from "@/components/ImageCard";
-import ThemeToggle from "@/components/ThemeToggle";
-import ImagePreviewModal from "@/components/ImagePreviewModal";
-import Footer from "@/components/Footer";
+const ImagePreviewModal = lazy(() => import("@/components/ImagePreviewModal"));
+import SiteHeader from "@/components/SiteHeader";
+import SiteFooter from "@/components/SiteFooter";
 import CompressionSettings from "@/components/CompressionSettings";
 import StatsBar from "@/components/StatsBar";
 import ActionButtons from "@/components/ActionButtons";
 import ProgressBar from "@/components/ProgressBar";
-import HeroFeatures from "@/components/HeroFeatures";
+import StudioResources from "@/components/StudioResources";
+import PresetBar from "@/components/PresetBar";
+import SelectionToolbar from "@/components/SelectionToolbar";
 import { compressPool } from "@/lib/compress-pool";
+import { PRESETS, getPreset, type PresetId } from "@/lib/presets";
+import { HOME } from "@/seo/routes";
 import {
   type ImageFile, type OutputFormat, type CompressionOptions,
-  formatBytes, getCompressionRatio, downloadBlob,
+  formatBytes, getCompressionRatio, downloadBlob, downloadUrl,
 } from "@/lib/image-utils";
+
+const AUTO_COMPRESS_KEY = "imagealchemy:auto-compress";
+const PRESET_KEY = "imagealchemy:preset";
 
 export default function Index() {
   const [images, setImages] = useState<ImageFile[]>([]);
-  const [format, setFormat] = useState<OutputFormat>("webp");
-  const [quality, setQuality] = useState(80);
-  const [maxDimension, setMaxDimension] = useState(0);
+  const [presetId, setPresetId] = useState<PresetId>(() => {
+    const saved = localStorage.getItem(PRESET_KEY) as PresetId | null;
+    return saved && PRESETS.some((p) => p.id === saved) ? saved : "web";
+  });
+  const initialPreset = getPreset(presetId) ?? PRESETS[0];
+  const [format, setFormat] = useState<OutputFormat>(
+    initialPreset.format === "auto" ? "webp" : initialPreset.format
+  );
+  const [autoPick, setAutoPick] = useState<boolean>(initialPreset.format === "auto");
+  const [quality, setQuality] = useState(initialPreset.quality);
+  const [maxDimension, setMaxDimension] = useState(initialPreset.maxDimension);
+  const [autoCompress, setAutoCompress] = useState<boolean>(() => {
+    return localStorage.getItem(AUTO_COMPRESS_KEY) === "true";
+  });
+  const [zipFile, setZipFile] = useState<{ href: string; name: string } | null>(null);
+  const packing = useRef(false);
+  useEffect(() => { setZipFile(null); }, [images]);
+  useEffect(() => () => { if (zipFile) URL.revokeObjectURL(zipFile.href); }, [zipFile]);
+  const [targetBytes, setTargetBytes] = useState(0);
   const [processing, setProcessing] = useState(false);
+  const [paused, setPaused] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
   const [settingsOpen, setSettingsOpen] = useState(true);
   const [previewImage, setPreviewImage] = useState<ImageFile | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
   const abortRef = useRef<AbortController | null>(null);
+  const pausedRef = useRef(false);
+  const activeRun = useRef(false);
+  const imagesRef = useRef(images);
+  imagesRef.current = images;
+
+  // Persist preferences
+  useEffect(() => { localStorage.setItem(AUTO_COMPRESS_KEY, String(autoCompress)); }, [autoCompress]);
+  useEffect(() => { localStorage.setItem(PRESET_KEY, presetId); }, [presetId]);
 
   // Cleanup all object URLs on unmount
   useEffect(() => {
     return () => {
-      images.forEach((img) => {
+      abortRef.current?.abort();
+      imagesRef.current.forEach((img) => {
         URL.revokeObjectURL(img.previewUrl);
         if (img.compressedUrl) URL.revokeObjectURL(img.compressedUrl);
       });
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Apply preset
+  const applyPreset = useCallback((id: PresetId) => {
+    const p = getPreset(id);
+    if (!p || id === "custom") return;
+    setPresetId(id);
+    if (p.format === "auto") {
+      setAutoPick(true);
+    } else {
+      setAutoPick(false);
+      setFormat(p.format);
+    }
+    setQuality(p.quality);
+    setMaxDimension(p.maxDimension);
+  }, []);
+
+  // Detect "custom" if user manually changes settings
+  const markCustom = useCallback(() => {
+    setPresetId("custom");
+  }, []);
+
+  const handleFormatChange = useCallback((f: OutputFormat) => {
+    setFormat(f);
+    setAutoPick(false);
+    markCustom();
+  }, [markCustom]);
+
+  const handleQualityChange = useCallback((q: number) => {
+    setQuality(q);
+    markCustom();
+  }, [markCustom]);
+
+  const handleMaxDimensionChange = useCallback((d: number) => {
+    setMaxDimension(d);
+    markCustom();
+  }, [markCustom]);
+
+  const { search } = useLocation();
+  const [setupNotice, setSetupNotice] = useState("");
+  const announceSettings = (message: string) => {
+    setSetupNotice(message);
+    document.querySelector<HTMLButtonElement>("#tool .primary-action")?.focus();
+  };
+  useEffect(() => {
+    const value = new URLSearchParams(search).get("preset");
+    if (!value) return;
+    const preset = PRESETS.find(p => p.id === value);
+    if (preset) { applyPreset(preset.id); setSetupNotice(preset.label + " preset selected."); }
+    else if (value === "webp" || value === "avif" || value === "jpeg" || value === "png") {
+      handleFormatChange(value); const rawQuality = new URLSearchParams(search).get("quality");
+      const q = rawQuality && /^([1-9][0-9]?|100)$/.test(rawQuality) ? Number(rawQuality) : null;
+      if (q && value !== "png") handleQualityChange(q);
+      setSetupNotice(value.toUpperCase() + (q && value !== "png" ? " quality " + q : "") + " selected.");
+    }
+  }, [search, applyPreset, handleFormatChange, handleQualityChange]);
+
+  // Throttled progress update
+  const pendingUpdatesRef = useRef<Map<string, ImageFile>>(new Map());
+  const rafRef = useRef<number | null>(null);
+
+  const flushUpdates = useCallback(() => {
+    const updates = pendingUpdatesRef.current;
+    if (updates.size === 0) return;
+    const batch = new Map(updates);
+    updates.clear();
+    rafRef.current = null;
+    setImages((prev) => {
+      return prev.map(img => batch.get(img.id) ?? img);
+    });
+  }, []);
+
+  const runCompression = useCallback(async (
+    targetImages: ImageFile[],
+    opts: { onlyRetry?: boolean } = {}
+  ) => {
+    if (targetImages.length === 0 || activeRun.current) return;
+    activeRun.current = true;
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    pausedRef.current = false;
+    setPaused(false);
+    setProcessing(true);
+    setProgress({ current: 0, total: targetImages.length });
+
+    const options: CompressionOptions = {
+      format,
+      quality: quality / 100,
+      maxDimension: maxDimension || null,
+    };
+
+    const results = await compressPool(
+      targetImages,
+      options,
+      (update) => {
+        // Find the index in current state by id
+        pendingUpdatesRef.current.set(update.image.id, update.image);
+        setProgress({ current: update.completed, total: targetImages.length });
+        if (!rafRef.current) {
+          rafRef.current = requestAnimationFrame(flushUpdates);
+        }
+      },
+      {
+        signal: controller.signal,
+        isPaused: () => pausedRef.current,
+        autoPick,
+        onlyRetry: opts.onlyRetry,
+        targetBytes,
+      },
+    );
+
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    pendingUpdatesRef.current.clear();
+
+    // Merge results back by id
+    setImages((prev) => {
+      const map = new Map(results.map((r) => [r.id, r]));
+      return prev.map((img) => map.get(img.id) ?? img);
+    });
+
+    activeRun.current = false;
+    setProcessing(false);
+    setPaused(false);
+
+    if (controller.signal.aborted) {
+      toast.warning("Compression cancelled");
+      return;
+    }
+
+    const doneCount = results.filter((i) => i.status === "done").length;
+    const failedCount = results.filter((i) => i.status === "error").length;
+    if (doneCount > 0) {
+      toast.success(`${doneCount} image${doneCount > 1 ? "s" : ""} compressed!`);
+    }
+    if (failedCount > 0) {
+      toast.error(`${failedCount} failed — use Retry Failed to try again`);
+    }
+  }, [format, quality, maxDimension, autoPick, targetBytes, flushUpdates]);
+
+  const processAll = useCallback(() => {
+    return runCompression(imagesRef.current);
+  }, [runCompression]);
+
+  const retryFailed = useCallback(() => {
+    const failed = imagesRef.current.filter(
+      (i) => i.status === "error" || i.status === "cancelled"
+    );
+    if (failed.length === 0) {
+      toast.info("Nothing to retry");
+      return;
+    }
+    return runCompression(failed, { onlyRetry: true });
+  }, [runCompression]);
+
+  // Handle file additions — auto-compress new ones if enabled
   const handleFilesAdded = useCallback((newFiles: ImageFile[]) => {
     setImages((prev) => [...prev, ...newFiles]);
     toast.success(`${newFiles.length} image${newFiles.length > 1 ? "s" : ""} added`);
-  }, []);
+    if (autoCompress) {
+      void runCompression(newFiles);
+    }
+  }, [autoCompress, runCompression]);
 
   const removeImage = useCallback((id: string) => {
     setImages((prev) => {
@@ -55,152 +252,201 @@ export default function Index() {
       }
       return prev.filter((i) => i.id !== id);
     });
+    setSelected((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
   }, []);
 
   const clearAll = useCallback(() => {
-    images.forEach((img) => {
-      URL.revokeObjectURL(img.previewUrl);
-      if (img.compressedUrl) URL.revokeObjectURL(img.compressedUrl);
-    });
-    setImages([]);
-  }, [images]);
-
-  const processAll = useCallback(async () => {
-    if (images.length === 0) return;
-
     abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
+    setImages((prev) => {
+      prev.forEach((img) => {
+        URL.revokeObjectURL(img.previewUrl);
+        if (img.compressedUrl) URL.revokeObjectURL(img.compressedUrl);
+      });
+      return [];
+    });
+    setSelected(new Set());
+  }, []);
 
-    setProcessing(true);
-    setProgress({ current: 0, total: images.length });
+  // Pause / cancel
+  const pause = useCallback(() => {
+    pausedRef.current = true;
+    setPaused(true);
+  }, []);
+  const resume = useCallback(() => {
+    pausedRef.current = false;
+    setPaused(false);
+  }, []);
+  const cancel = useCallback(() => {
+    abortRef.current?.abort();
+    pausedRef.current = false;
+    setPaused(false);
+  }, []);
 
-    const options: CompressionOptions = {
-      format,
-      quality: quality / 100,
-      maxDimension: maxDimension || null,
-    };
+  // Selection handlers
+  const toggleSelect = useCallback((id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
-    const results = await compressPool(
-      images,
-      options,
-      (update) => {
-        setImages((prev) => {
-          const next = [...prev];
-          next[update.index] = update.image;
-          return next;
-        });
-        setProgress({ current: update.completed, total: images.length });
+  const selectAll = useCallback(() => {
+    setSelected(new Set(imagesRef.current.map((i) => i.id)));
+  }, []);
+
+  const clearSelection = useCallback(() => setSelected(new Set()), []);
+
+  const applyToSelection = useCallback(() => {
+    const ids = selected;
+    if (ids.size === 0) return;
+    setImages((prev) => prev.map((img) => ids.has(img.id) ? {
+      ...img,
+      override: {
+        format: autoPick ? undefined : format,
+        quality: quality / 100,
+        maxDimension: maxDimension || null,
+        auto: autoPick,
       },
-      controller.signal,
-    );
+    } : img));
+    toast.success(`Applied current settings to ${ids.size} image${ids.size > 1 ? "s" : ""}`);
+  }, [selected, format, quality, maxDimension, autoPick]);
 
-    setImages(results);
-    setProcessing(false);
-    const doneCount = results.filter((i) => i.status === "done").length;
-    toast.success(`${doneCount} image${doneCount > 1 ? "s" : ""} compressed!`);
-  }, [images, format, quality, maxDimension]);
+  const autoPickSelection = useCallback(() => {
+    const ids = selected;
+    if (ids.size === 0) return;
+    setImages((prev) => prev.map((img) => ids.has(img.id) ? {
+      ...img,
+      override: {
+        ...img.override,
+        auto: true,
+        quality: quality / 100,
+        maxDimension: maxDimension || null,
+      },
+    } : img));
+    toast.success(`Auto-pick enabled for ${ids.size} image${ids.size > 1 ? "s" : ""}`);
+  }, [selected, quality, maxDimension]);
+
+  const deleteSelection = useCallback(() => {
+    const ids = selected;
+    if (ids.size === 0) return;
+    setImages((prev) => {
+      prev.forEach((img) => {
+        if (ids.has(img.id)) {
+          URL.revokeObjectURL(img.previewUrl);
+          if (img.compressedUrl) URL.revokeObjectURL(img.compressedUrl);
+        }
+      });
+      return prev.filter((img) => !ids.has(img.id));
+    });
+    setSelected(new Set());
+    toast.success(`Removed ${ids.size} image${ids.size > 1 ? "s" : ""}`);
+  }, [selected]);
 
   const downloadZip = useCallback(async () => {
-    const completed = images.filter((i) => i.status === "done" && i.compressedBlob);
-    if (completed.length === 0) return;
-
-    const zip = new JSZip();
-    completed.forEach((img) => zip.file(img.outputFilename, img.compressedBlob!));
-    const blob = await zip.generateAsync({ type: "blob" });
-    downloadBlob(blob, `imageforge-${Date.now()}.zip`);
-    toast.success("ZIP downloaded!");
-  }, [images]);
+    const snapshot = imagesRef.current;
+    const completed = snapshot.filter((i) => i.status === "done" && i.compressedBlob);
+    if (!completed.length || packing.current) return;
+    packing.current = true;
+    try {
+      const { default: JSZip } = await import("jszip");
+      const zip = new JSZip();
+      // Unique names: src.png + src.jpg both become src.webp and would overwrite.
+      const used = new Set<string>();
+      completed.forEach((img) => {
+        let name = img.outputFilename;
+        const dot = name.lastIndexOf(".");
+        const base = dot > 0 ? name.slice(0, dot) : name;
+        const ext = dot > 0 ? name.slice(dot) : "";
+        for (let n = 2; used.has(name.toLowerCase()); n++) name = `${base}-${n}${ext}`;
+        used.add(name.toLowerCase());
+        zip.file(name, img.compressedBlob!);
+      });
+      const blob = await zip.generateAsync({ type: "blob" });
+      if (snapshot !== imagesRef.current) return;
+      const file = { href: URL.createObjectURL(blob), name: `imagealchemy-${Date.now()}.zip` };
+      setZipFile(file);
+      downloadUrl(file.href, file.name);
+      toast.success("ZIP ready");
+    } catch {
+      toast.error("Could not prepare the ZIP. Try again or download individual files.");
+    } finally {
+      packing.current = false;
+    }
+  }, []);
 
   const downloadAllIndividually = useCallback(() => {
-    const completed = images.filter((i) => i.status === "done" && i.compressedBlob);
+    const completed = imagesRef.current.filter((i) => i.status === "done" && i.compressedBlob);
     completed.forEach((img) => downloadBlob(img.compressedBlob!, img.outputFilename));
     toast.success(`${completed.length} files downloaded!`);
-  }, [images]);
+  }, []);
+
+  const toggleSettings = useCallback(() => setSettingsOpen((o) => !o), []);
 
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
-
       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
         e.preventDefault();
         processAll();
       }
       if (e.key === "Escape") {
         setPreviewImage(null);
+        clearSelection();
       }
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "d") {
         e.preventDefault();
         downloadZip();
       }
+      if ((e.metaKey || e.ctrlKey) && e.key === "a" && imagesRef.current.length > 0) {
+        e.preventDefault();
+        selectAll();
+      }
+      if ((e.key === " " || e.code === "Space") && processing) {
+        e.preventDefault();
+        if (pausedRef.current) resume(); else pause();
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [processAll, downloadZip]);
+  }, [processAll, downloadZip, selectAll, clearSelection, processing, pause, resume]);
 
   const stats = useMemo(() => {
     const totalOriginal = images.reduce((s, i) => s + i.originalSize, 0);
     const completed = images.filter((i) => i.status === "done" && i.compressedSize != null);
     const totalCompressed = completed.reduce((s, i) => s + (i.compressedSize || 0), 0);
-    const savedPct = completed.length > 0 ? getCompressionRatio(totalOriginal, totalCompressed) : 0;
-    return { count: images.length, totalOriginal, totalCompressed, savedPct, completedCount: completed.length };
+    const savedPct = completed.length > 0 ? getCompressionRatio(completed.reduce((sum, img) => sum + img.originalSize, 0), totalCompressed) : 0;
+    const failedCount = images.filter((i) => i.status === "error" || i.status === "cancelled").length;
+    return {
+      count: images.length,
+      totalOriginal,
+      totalCompressed,
+      savedPct,
+      completedCount: completed.length,
+      failedCount,
+    };
   }, [images]);
 
   const hasCompleted = stats.completedCount > 0;
 
   return (
     <div className="min-h-screen bg-background transition-colors duration-700">
-      {/* Ambient orbs */}
-      <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
-        <div className="glow-orb absolute -left-48 -top-48 h-[700px] w-[700px] rounded-full bg-primary" />
-        <div className="glow-orb absolute -bottom-48 -right-48 h-[600px] w-[600px] rounded-full bg-accent" style={{ animationDelay: '-8s' }} />
-        <div className="glow-orb absolute left-1/3 top-1/2 h-[400px] w-[400px] rounded-full bg-success" style={{ animationDelay: '-14s' }} />
-      </div>
-
-      <div className="relative z-10">
-        {/* Header */}
-        <header className="sticky top-0 z-50 border-b border-border/30 bg-background/50 backdrop-blur-3xl backdrop-saturate-150">
-          <div className="mx-auto flex max-w-6xl items-center justify-between px-5 py-3.5 sm:px-8">
-            <div className="flex items-center gap-3.5">
-              <motion.div
-                whileHover={{ rotate: 8, scale: 1.05 }}
-                transition={{ type: "spring", stiffness: 400 }}
-                className="flex h-10 w-10 items-center justify-center rounded-2xl text-primary-foreground shadow-lg"
-                style={{ background: 'var(--gradient-primary)' }}
-              >
-                <Sparkles className="h-5 w-5" strokeWidth={2} />
-              </motion.div>
-              <div>
-                <h1 className="text-base font-bold tracking-tight sm:text-lg">
-                  <span className="gradient-text">ImageForge</span>
-                </h1>
-                <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-muted-foreground/60">
-                  Compression Studio
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <div className="hidden items-center gap-1.5 rounded-full border border-border/40 bg-card/30 backdrop-blur-sm px-3 py-1.5 text-xs font-medium text-muted-foreground/40 lg:inline-flex">
-                <Keyboard className="h-3.5 w-3.5" />
-                <kbd className="font-mono text-[10px]">⌘↵</kbd> Compress
-                <span className="mx-1 h-3 w-px bg-border/30" />
-                <kbd className="font-mono text-[10px]">⌘⇧D</kbd> ZIP
-              </div>
-              <div className="hidden items-center gap-1.5 rounded-full border border-border/40 bg-card/30 backdrop-blur-sm px-3 py-1.5 text-xs font-medium text-muted-foreground/60 sm:inline-flex">
-                <Lock className="h-3.5 w-3.5" /> Private
-                <span className="mx-1.5 h-3 w-px bg-border/50" />
-                <Globe className="h-3.5 w-3.5" /> Browser-only
-              </div>
-              <ThemeToggle />
-            </div>
-          </div>
-        </header>
-
-        {/* Main */}
-        <main className="mx-auto max-w-6xl px-5 py-10 sm:px-8 sm:py-16">
-          <DropZone onFilesAdded={handleFilesAdded} hasFiles={images.length > 0} currentCount={images.length} />
+      <Seo path="/" title={HOME.title} description={HOME.description} faqs={HOME_FAQS} />
+      <div>
+        <SiteHeader />
+        <main id="main-content" className="studio-container">
+          <StudioIntro onApplyQuality={q => {
+            handleFormatChange("webp"); handleQualityChange(q);
+            announceSettings("WebP quality " + q + " selected. Choose an image to begin.");
+          }} onFilesAdded={handleFilesAdded} hasFiles={images.length > 0} currentCount={images.length} disabled={processing} />
+          {!images.length && setupNotice && <p role="status" className="setup-notice">{setupNotice}</p>}
 
           <AnimatePresence mode="wait">
             {images.length > 0 && (
@@ -210,17 +456,29 @@ export default function Index() {
                 exit={{ opacity: 0, y: -12 }}
                 transition={{ type: "spring", stiffness: 300, damping: 30 }}
               >
+                <fieldset disabled={processing} className="min-w-0">
+                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={autoCompress} onChange={e => setAutoCompress(e.target.checked)} />Compress future additions automatically</label>
+                <h2 className="sr-only">Compression presets</h2>
+                <PresetBar activeId={presetId} onSelect={applyPreset} />
+
+                <h2 className="sr-only">Compression settings</h2>
                 <CompressionSettings
                   format={format}
                   quality={quality}
                   maxDimension={maxDimension}
-                  onFormatChange={setFormat}
-                  onQualityChange={setQuality}
-                  onMaxDimensionChange={setMaxDimension}
+                  targetBytes={targetBytes}
+                  onTargetChange={setTargetBytes}
+                  onFormatChange={handleFormatChange}
+                  onQualityChange={handleQualityChange}
+                  onMaxDimensionChange={handleMaxDimensionChange}
                   isOpen={settingsOpen}
-                  onToggle={() => setSettingsOpen((o) => !o)}
+                  onToggle={toggleSettings}
+                  autoPick={autoPick}
+                  onAutoPickChange={(v) => { setAutoPick(v); markCustom(); }}
                 />
 
+                </fieldset>
+                <h2 className="sr-only">Batch statistics</h2>
                 <StatsBar
                   count={stats.count}
                   totalOriginal={stats.totalOriginal}
@@ -233,6 +491,10 @@ export default function Index() {
                   processing={processing}
                   current={progress.current}
                   total={progress.total}
+                  paused={paused}
+                  onPause={pause}
+                  onResume={resume}
+                  onCancel={cancel}
                 />
 
                 <ActionButtons
@@ -240,15 +502,18 @@ export default function Index() {
                   onDownloadZip={downloadZip}
                   onDownloadIndividual={downloadAllIndividually}
                   onClearAll={clearAll}
+                  onRetryFailed={retryFailed}
                   hasCompleted={hasCompleted}
+                  hasFailed={stats.failedCount > 0}
                   processing={processing}
                 />
 
+                {zipFile && <p className="zip-ready" role="status">Archive ready. <a href={zipFile.href} download={zipFile.name}>Save ZIP</a></p>}
                 {/* Image Grid */}
-                <div className="mt-12">
+                <fieldset disabled={processing} className="mt-12 min-w-0">
                   <div className="mb-5 flex items-center justify-between">
                     <div className="flex items-center gap-3">
-                      <h3 className="text-sm font-bold text-foreground">Image Queue</h3>
+                      <h2 className="text-sm font-bold text-foreground">Image Queue</h2>
                       <motion.span
                         key={stats.count}
                         initial={{ scale: 0.5 }}
@@ -257,17 +522,28 @@ export default function Index() {
                       >
                         {stats.count}
                       </motion.span>
+                      <span className="hidden text-[11px] font-medium text-muted-foreground sm:inline">
+                        ⇧/⌘+click to select
+                      </span>
                     </div>
                     {hasCompleted && (
-                      <span className="flex items-center gap-1.5 text-[11px] font-medium text-success/60">
+                      <span className="flex items-center gap-1.5 text-[11px] font-medium text-success">
                         <CheckCircle2 className="h-3 w-3" /> {stats.completedCount} done
                       </span>
                     )}
                   </div>
-                  <motion.div
-                    layout
-                    className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5"
-                  >
+
+                  <SelectionToolbar
+                    selectedCount={selected.size}
+                    totalCount={images.length}
+                    onSelectAll={selectAll}
+                    onClearSelection={clearSelection}
+                    onApplyToSelection={applyToSelection}
+                    onDeleteSelection={deleteSelection}
+                    onAutoPickSelection={autoPickSelection}
+                  />
+
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
                     <AnimatePresence mode="popLayout">
                       {images.map((img, i) => (
                         <ImageCard
@@ -276,26 +552,31 @@ export default function Index() {
                           onRemove={removeImage}
                           onPreview={setPreviewImage}
                           index={i}
+                          selected={selected.has(img.id)}
+                          onToggleSelect={toggleSelect}
                         />
                       ))}
                     </AnimatePresence>
-                  </motion.div>
-                </div>
+                  </div>
+                </fieldset>
               </motion.div>
             )}
           </AnimatePresence>
 
-          {/* Empty State */}
-          <AnimatePresence>
-            {images.length === 0 && <HeroFeatures />}
-          </AnimatePresence>
+          {!images.length && <StudioResources onFormat={f => {
+            handleFormatChange(f);
+            announceSettings(f.toUpperCase() + " selected. Choose an image to begin.");
+          }} onQuality={q => {
+            handleFormatChange("webp"); handleQualityChange(q);
+            announceSettings("WebP quality " + q + " selected. Choose an image to begin.");
+          }} />}
         </main>
 
-        <Footer />
+        <SiteFooter />
       </div>
 
       {previewImage && (
-        <ImagePreviewModal image={previewImage} onClose={() => setPreviewImage(null)} />
+        <Suspense fallback={null}><ImagePreviewModal image={previewImage} onClose={() => setPreviewImage(null)} /></Suspense>
       )}
     </div>
   );

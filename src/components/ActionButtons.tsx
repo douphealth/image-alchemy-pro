@@ -1,29 +1,32 @@
-import { motion } from "framer-motion";
-import { Zap, Download, Trash2, FileDown } from "lucide-react";
+import { memo } from "react";
+import { MotionDiv, MotionSection, MotionNav, MotionA, MotionSpan, MotionP, MotionButton, MotionLi } from "@/lib/motion";
+import { Zap, Download, Trash2, FileDown, RotateCw } from "lucide-react";
 
 interface ActionButtonsProps {
   onCompress: () => void;
   onDownloadZip: () => void;
   onDownloadIndividual: () => void;
   onClearAll: () => void;
+  onRetryFailed?: () => void;
   hasCompleted: boolean;
+  hasFailed?: boolean;
   processing: boolean;
 }
 
-export default function ActionButtons({
-  onCompress, onDownloadZip, onDownloadIndividual, onClearAll,
-  hasCompleted, processing,
+function ActionButtons({
+  onCompress, onDownloadZip, onDownloadIndividual, onClearAll, onRetryFailed,
+  hasCompleted, hasFailed, processing,
 }: ActionButtonsProps) {
   if (processing) return null;
 
   return (
-    <motion.div
+    <MotionDiv
       className="mt-10 flex flex-wrap items-center justify-center gap-3"
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: 0.2 }}
     >
-      <motion.button
+      <MotionButton
         onClick={onCompress}
         whileHover={{ y: -2, scale: 1.02 }}
         whileTap={{ scale: 0.98 }}
@@ -32,11 +35,24 @@ export default function ActionButtons({
         <Zap className="h-4 w-4 transition-transform group-hover:scale-110" strokeWidth={2} />
         Compress All
         <kbd className="hidden rounded-md bg-primary-foreground/20 px-1.5 py-0.5 font-mono text-[9px] sm:inline">⌘↵</kbd>
-      </motion.button>
+      </MotionButton>
+
+      {hasFailed && (
+        <MotionButton
+          onClick={onRetryFailed}
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          whileHover={{ y: -2 }}
+          whileTap={{ scale: 0.98 }}
+          className="inline-flex items-center gap-2 rounded-2xl border border-accent/30 bg-accent/[0.08] px-5 py-4 text-sm font-bold text-accent transition-all duration-300 hover:bg-accent hover:text-accent-foreground"
+        >
+          <RotateCw className="h-4 w-4" strokeWidth={2} /> Retry Failed
+        </MotionButton>
+      )}
 
       {hasCompleted && (
         <>
-          <motion.button
+          <MotionButton
             onClick={onDownloadZip}
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
@@ -46,9 +62,9 @@ export default function ActionButtons({
           >
             <Download className="h-4 w-4" strokeWidth={2} /> Download ZIP
             <kbd className="hidden rounded-md bg-success/10 px-1.5 py-0.5 font-mono text-[9px] sm:inline">⌘⇧D</kbd>
-          </motion.button>
+          </MotionButton>
 
-          <motion.button
+          <MotionButton
             onClick={onDownloadIndividual}
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
@@ -57,18 +73,20 @@ export default function ActionButtons({
             className="inline-flex items-center gap-2 rounded-2xl border border-border/40 bg-card/30 backdrop-blur-sm px-5 py-4 text-sm font-semibold text-muted-foreground transition-all duration-300 hover:bg-card/60 hover:text-foreground"
           >
             <FileDown className="h-4 w-4" strokeWidth={1.5} /> Individual
-          </motion.button>
+          </MotionButton>
         </>
       )}
 
-      <motion.button
+      <MotionButton
         onClick={onClearAll}
         whileHover={{ y: -1 }}
         whileTap={{ scale: 0.98 }}
         className="inline-flex items-center gap-2 rounded-2xl border border-border/40 bg-card/30 backdrop-blur-sm px-7 py-4 text-sm font-semibold text-muted-foreground transition-all duration-300 hover:bg-destructive/10 hover:text-destructive hover:border-destructive/20"
       >
         <Trash2 className="h-4 w-4" strokeWidth={1.5} /> Clear All
-      </motion.button>
-    </motion.div>
+      </MotionButton>
+    </MotionDiv>
   );
 }
+
+export default memo(ActionButtons);

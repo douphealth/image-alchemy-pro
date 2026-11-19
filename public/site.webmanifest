@@ -1,0 +1,34 @@
+{
+  "name": "ImageAlchemy — Private Image Compression Studio",
+  "short_name": "ImageAlchemy",
+  "description": "Compress, convert and resize images to WebP, AVIF, JPEG and PNG entirely in your browser. Free, private, unlimited.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b0a14",
+  "theme_color": "#7c3aed",
+  "categories": [
+    "productivity",
+    "utilities",
+    "graphics"
+  ],
+  "icons": [
+    {
+      "src": "/favicon-v4.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/favicon-v4.ico",
+      "sizes": "16x16 32x32 48x48 64x64",
+      "type": "image/x-icon"
+    },
+    {
+      "src": "/apple-touch-icon-v4.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

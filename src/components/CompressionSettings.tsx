@@ -1,4 +1,5 @@
-import { motion, AnimatePresence } from "framer-motion";
+import { memo } from "react";
+import { MotionDiv, MotionSection, MotionNav, MotionA, MotionSpan, MotionP, MotionButton, MotionLi, AnimatePresence } from "@/lib/motion";
 import { Settings2, ChevronDown, FileType, Gauge, Maximize } from "lucide-react";
 import type { OutputFormat } from "@/lib/image-utils";
 
@@ -20,6 +21,8 @@ const RESIZE_OPTIONS = [
 ];
 
 interface CompressionSettingsProps {
+  targetBytes: number;
+  onTargetChange: (bytes: number) => void;
   format: OutputFormat;
   quality: number;
   maxDimension: number;
@@ -28,16 +31,20 @@ interface CompressionSettingsProps {
   onMaxDimensionChange: (d: number) => void;
   isOpen: boolean;
   onToggle: () => void;
+  autoPick?: boolean;
+  onAutoPickChange?: (v: boolean) => void;
 }
 
-export default function CompressionSettings({
+function CompressionSettings({
   format, quality, maxDimension,
   onFormatChange, onQualityChange, onMaxDimensionChange,
-  isOpen, onToggle,
+  isOpen, onToggle, targetBytes, onTargetChange,
+  autoPick, onAutoPickChange,
 }: CompressionSettingsProps) {
   return (
     <div className="mt-10">
       <button
+        aria-expanded={isOpen}
         onClick={onToggle}
         className="mb-4 flex w-full items-center justify-between rounded-2xl border border-border/40 bg-card/30 backdrop-blur-sm px-5 py-3.5 text-sm font-semibold text-foreground transition-colors duration-300 hover:bg-card/50"
       >
@@ -45,14 +52,14 @@ export default function CompressionSettings({
           <Settings2 className="h-4 w-4 text-primary" strokeWidth={1.5} />
           Compression Settings
         </span>
-        <motion.span animate={{ rotate: isOpen ? 180 : 0 }}>
+        <MotionSpan animate={{ rotate: isOpen ? 180 : 0 }}>
           <ChevronDown className="h-4 w-4 text-muted-foreground" />
-        </motion.span>
+        </MotionSpan>
       </button>
 
       <AnimatePresence>
         {isOpen && (
-          <motion.div
+          <MotionDiv
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
@@ -60,16 +67,34 @@ export default function CompressionSettings({
             className="overflow-hidden"
           >
             <div className="glass-card p-6 sm:p-8">
-              <div className="grid gap-8 sm:grid-cols-3">
+              <div className="grid gap-8 md:grid-cols-2">
                 {/* Format */}
                 <div className="space-y-3">
-                  <label className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">
-                    <FileType className="h-3.5 w-3.5" strokeWidth={1.5} /> Output Format
+                  <label className="flex items-center justify-between gap-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">
+                    <span className="flex items-center gap-1.5">
+                      <FileType className="h-3.5 w-3.5" strokeWidth={1.5} /> Output Format
+                    </span>
+                    {onAutoPickChange && (
+                      <button
+                        type="button"
+                        onClick={() => onAutoPickChange(!autoPick)}
+                        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold normal-case tracking-normal transition-all ${
+                          autoPick
+                            ? "border-accent/40 bg-accent/15 text-accent"
+                            : "border-border/40 bg-card/40 text-muted-foreground hover:text-foreground"
+                        }`}
+                        title="Encode WebP+AVIF+JPEG and keep the smallest"
+                      >
+                        🪄 Auto-pick {autoPick ? "ON" : "OFF"}
+                      </button>
+                    )}
                   </label>
-                  <div className="flex gap-2">
+                  <div className={`grid grid-cols-2 gap-2 transition-opacity ${autoPick ? "opacity-40 pointer-events-none" : ""}`}>
                     {FORMAT_OPTIONS.map((opt) => (
-                      <motion.button
+                      <MotionButton
                         key={opt.value}
+                        aria-pressed={format === opt.value && !autoPick}
+                        disabled={autoPick}
                         onClick={() => onFormatChange(opt.value)}
                         whileHover={{ y: -1 }}
                         whileTap={{ scale: 0.97 }}
@@ -82,14 +107,19 @@ export default function CompressionSettings({
                         <div className="text-lg leading-none mb-1.5">{opt.icon}</div>
                         <div className="text-sm font-bold">{opt.label}</div>
                         <div className="mt-0.5 text-[11px] font-medium opacity-50">{opt.desc}</div>
-                      </motion.button>
+                      </MotionButton>
                     ))}
                   </div>
+                  {autoPick && (
+                    <p className="text-[11px] font-medium text-accent/80">
+                      Compares WebP and AVIF, plus JPEG for opaque images, and keeps the smallest successful export.
+                    </p>
+                  )}
                 </div>
 
                 {/* Quality */}
                 <div className="space-y-3">
-                  <label className="flex items-center justify-between text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">
+                  <label htmlFor="quality-range" className="flex items-center justify-between text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
                     <span className="flex items-center gap-1.5">
                       <Gauge className="h-3.5 w-3.5" strokeWidth={1.5} /> Quality
                     </span>
@@ -97,33 +127,45 @@ export default function CompressionSettings({
                   </label>
                   <div className="pt-2">
                     <input
+                      id="quality-range"
                       type="range"
                       min={1}
                       max={100}
                       value={quality}
                       onChange={(e) => onQualityChange(Number(e.target.value))}
                       className="w-full"
-                      disabled={format === "png"}
+                      disabled={format === "png" && !autoPick}
+                      aria-label="Compression quality percentage"
                     />
                   </div>
-                  <div className="flex justify-between text-[11px] font-medium text-muted-foreground/40">
+                  <div className="flex justify-between text-[11px] font-medium text-muted-foreground">
                     <span>Smaller file</span>
                     <span>Higher quality</span>
                   </div>
-                  {format === "png" && (
-                    <p className="text-[11px] font-medium text-accent/70">PNG is lossless — quality doesn't apply</p>
+                  {format === "png" && !autoPick && (
+                    <p className="text-[11px] font-medium text-accent">PNG is lossless — quality doesn't apply</p>
                   )}
                 </div>
 
+                <div className="export-target space-y-3">
+                  <label htmlFor="target-size">File size target</label>
+                  <select id="target-size" value={targetBytes} onChange={e => onTargetChange(Number(e.target.value))}>
+                    <option value={0}>Use selected quality</option>
+                    {[100, 250, 500, 1024].map(kib => <option key={kib} value={kib * 1024}>{kib === 1024 ? "1 MiB" : kib + " KiB"} per image</option>)}
+                  </select>
+                  {targetBytes > 0 && <p>{format === "png" && !autoPick ? "PNG is lossless. Each export shows whether it fits." : "The studio tries lower quality settings when needed. Each export shows whether it fits."}</p>}
+                </div>
                 {/* Resize */}
                 <div className="space-y-3">
-                  <label className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">
+                  <label htmlFor="max-dimension-select" className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
                     <Maximize className="h-3.5 w-3.5" strokeWidth={1.5} /> Max Dimension
                   </label>
                   <select
+                    id="max-dimension-select"
                     value={maxDimension}
                     onChange={(e) => onMaxDimensionChange(Number(e.target.value))}
                     className="w-full rounded-xl border border-border/40 bg-card/30 backdrop-blur-sm px-4 py-3.5 text-sm font-semibold text-foreground focus:border-primary/30 focus:outline-none focus:ring-2 focus:ring-primary/10 transition-all duration-300"
+                    aria-label="Maximum image dimension in pixels"
                   >
                     {RESIZE_OPTIONS.map((opt) => (
                       <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -132,9 +174,11 @@ export default function CompressionSettings({
                 </div>
               </div>
             </div>
-          </motion.div>
+          </MotionDiv>
         )}
       </AnimatePresence>
     </div>
   );
 }
+
+export default memo(CompressionSettings);
